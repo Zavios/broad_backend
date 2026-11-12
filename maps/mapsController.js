@@ -6,40 +6,92 @@ dotenv.config();
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 // ──────────────────────────────────────────────
-//  Compute Routes (Routes API v2)
+//  Compute Routes (Routes API v2 with Directions API fallback)
 // ──────────────────────────────────────────────
 export const getRoutes = async (req, res) => {
   try {
     const { origin, destination, computeAlternatives = true } = req.body;
 
-    const response = await axios.post(
-      "https://routes.googleapis.com/directions/v2:computeRoutes",
-      {
-        origin: { location: { latLng: origin } },
-        destination: { location: { latLng: destination } },
-        travelMode: "DRIVE",
-        routingPreference: "TRAFFIC_AWARE",
-        computeAlternativeRoutes: computeAlternatives,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": API_KEY,
-          "X-Goog-FieldMask":
-            "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs",
+    // 1. Try Routes API v2 first
+    try {
+      const response = await axios.post(
+        "https://routes.googleapis.com/directions/v2:computeRoutes",
+        {
+          origin: { location: { latLng: origin } },
+          destination: { location: { latLng: destination } },
+          travelMode: "DRIVE",
+          routingPreference: "TRAFFIC_AWARE",
+          computeAlternativeRoutes: computeAlternatives,
         },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": API_KEY,
+            "X-Goog-FieldMask":
+              "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.legs",
+          },
+          timeout: 8000,
+        },
+      );
+
+      const routes = (response.data.routes || []).map((route) => ({
+        distanceMeters: route.distanceMeters,
+        distanceKm: (route.distanceMeters / 1000).toFixed(2),
+        duration: route.duration,
+        encodedPolyline: route.polyline?.encodedPolyline || null,
+        legs: route.legs || [],
+      }));
+
+      if (routes.length > 0) {
+        return res.status(200).json({ success: true, data: routes });
+      }
+    } catch (v2Error) {
+      console.warn("Routes API v2 failed or not enabled, attempting Directions API fallback...", v2Error.response?.data?.error?.message || v2Error.message);
+    }
+
+    // 2. Fallback to classic Directions API (maps.googleapis.com)
+    console.log("Calling classic Directions API fallback...");
+    const dirResponse = await axios.get(
+      "https://maps.googleapis.com/maps/api/directions/json",
+      {
+        params: {
+          origin: `${origin.latitude},${origin.longitude}`,
+          destination: `${destination.latitude},${destination.longitude}`,
+          alternatives: computeAlternatives,
+          mode: "driving",
+          key: API_KEY,
+        },
+        timeout: 8000,
       },
     );
 
-    const routes = (response.data.routes || []).map((route) => ({
-      distanceMeters: route.distanceMeters,
-      distanceKm: (route.distanceMeters / 1000).toFixed(2),
-      duration: route.duration,
-      encodedPolyline: route.polyline?.encodedPolyline || null,
-      legs: route.legs || [],
-    }));
+    const dirData = dirResponse.data;
+    if (dirData.status === "OK" && Array.isArray(dirData.routes) && dirData.routes.length > 0) {
+      const routes = dirData.routes.map((route) => {
+        const totalDistanceMeters = route.legs.reduce((acc, leg) => acc + (leg.distance?.value || 0), 0);
+        const totalDurationSeconds = route.legs.reduce((acc, leg) => acc + (leg.duration?.value || 0), 0);
+        return {
+          distanceMeters: totalDistanceMeters,
+          distanceKm: (totalDistanceMeters / 1000).toFixed(2),
+          duration: `${totalDurationSeconds}s`,
+          encodedPolyline: route.overview_polyline?.points || null,
+          legs: route.legs || [],
+        };
+      });
 
-    return res.status(200).json({ success: true, data: routes });
+      return res.status(200).json({ success: true, data: routes });
+    }
+
+    // If directions API returned an error status (e.g. ZERO_RESULTS, REQUEST_DENIED)
+    if (dirData.status && dirData.status !== "OK") {
+      console.error("Directions API returned non-OK status:", dirData.status, dirData.error_message);
+      return res.status(400).json({
+        success: false,
+        error: dirData.error_message || `Directions API returned: ${dirData.status}`,
+      });
+    }
+
+    return res.status(404).json({ success: false, error: "No routes found." });
   } catch (error) {
     console.error("getRoutes error:", error.response?.data || error.message);
     return res.status(500).json({

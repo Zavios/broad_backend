@@ -15,8 +15,8 @@ const router = Router();
 // ── Public routes ───────────────────────────────
 router.post("/signup", signUp);
 router.post("/signin", signIn);
-router.get("/google", googleOAuth);
-router.get("/callback", oauthCallback);
+router.get("/google", googleOAuth); // not completed
+router.get("/callback", oauthCallback); // not completed
 router.post("/refresh", refreshSession);
 
 // ── Protected routes ────────────────────────────
@@ -24,4 +24,3 @@ router.post("/signout", authenticate, signOut);
 router.get("/me", authenticate, getMe);
 
 export default router;
-
